@@ -50,6 +50,7 @@ def normalize_url(url):
 
 seenUrls = set()  
 word_counter = Counter()  
+subdomain_unique_urls = {}
 subdomain_count = {}  
 longest_page = {"url": None, "word_count": 0}  
 STOP_WORDS = {
@@ -62,7 +63,7 @@ STOP_WORDS = {
 simhash_cache = {}
 
 def scraper(url, resp):
-    global seenUrls, word_counter, subdomain_count, longest_page
+    global seenUrls, word_counter, subdomain_count, longest_page, subdomain_unique_urls
 
     # clean_url = urldefrag(url)[0]
     
@@ -116,6 +117,11 @@ def scraper(url, resp):
         return []
     seenUrls.add((normalized_url))
 
+    parsed = urlparse(url)
+    if parsed.netloc.endswith("ics.uci.edu"):
+        if parsed.netloc not in subdomain_unique_urls:
+            subdomain_unique_urls[parsed.netloc] = set()
+        subdomain_unique_urls[parsed.netloc].add(normalized_url)
     
     links, word_count = extract_next_links(url, resp)
 
@@ -224,6 +230,19 @@ def is_valid(url):
         else:
             print(f"skip ngs.ics.uci.edu others: {url}")
             return False
+        
+    if parsed.netloc in ["ics.uci.edu", "www.ics.uci.edu"] and parsed.path.startswith("/~eppstein"):
+        if parsed.path not in ["/~eppstein/", "/~eppstein", "/~eppstein/index.html"]:
+            print(f"Skipping subpage under ~eppstein: {url}")
+            return False
+        
+    if parsed.netloc == "sli.ics.uci.edu":
+        if parsed.path == "/" or parsed.path == "":
+            return True
+        else:
+            print(f"skip sli.ics.uci.edu others: {url}")
+            return False
+
     
     if re.search(
         r"\.(css|js|bmp|gif|jpe?g|ico"
@@ -273,9 +292,11 @@ def print_summary():
     for word, count in word_counter.most_common(50):
         print(f"{word}: {count}")
 
-    print("\n ICS Subdomains:")
-    for domain, count in sorted(subdomain_count.items()):
-        print(f"{domain}, {count}")
-
+    # print("\n ICS Subdomains:")
+    # for domain, count in sorted(subdomain_count.items()):
+    #     print(f"{domain}, {count}")
+    print("\nICS Subdomains (Unique Pages Count):")
+    for subdomain in sorted(subdomain_unique_urls.keys()):  
+        print(f"http://{subdomain}, {len(subdomain_unique_urls[subdomain])}")
 
 atexit.register(print_summary)
