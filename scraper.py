@@ -11,41 +11,43 @@ def simhash(text, hash_bits=64):
     words = text.split()
     weights = {}
     
-    # 统计词频
+    
     for word in words:
         weights[word] = weights.get(word, 0) + 1
 
-    # 初始化哈希向量
+    
     hash_vector = [0] * hash_bits
 
     for word, weight in weights.items():
-        # 计算单词的哈希值（64 位二进制）
-        hash_value = int(hashlib.md5(word.encode()).hexdigest(), 16)  # 128-bit MD5 哈希
-        hash_value = hash_value & ((1 << hash_bits) - 1)  # 取低 64 位
+       
+        hash_value = int(hashlib.md5(word.encode()).hexdigest(), 16)  
+        hash_value = hash_value & ((1 << hash_bits) - 1)  
 
         for i in range(hash_bits):
-            # 提取哈希值的第 i 位
+            
             bit = 1 if (hash_value & (1 << i)) else -1
-            # 根据单词的权重调整哈希向量
+            
             hash_vector[i] += bit * weight
 
-    # 归一化二进制哈希
+
     simhash_value = 0
     for i in range(hash_bits):
         if hash_vector[i] > 0:
-            simhash_value |= (1 << i)  # 设为 1
+            simhash_value |= (1 << i)  
 
     return simhash_value
 
 def hamming_distance(hash1, hash2):
-    x = hash1 ^ hash2  # 计算异或
-    return bin(x).count('1')  # 计算二进制中 1 的个数
+    x = hash1 ^ hash2  
+    return bin(x).count('1')  
 
 def normalize_url(url):
-    parsed = urlparse(url)
-    query_params = frozenset((k, tuple(v)) for k, v in parse_qs(parsed.query).items() if k not in {"tribe-bar-date", "eventDate", "ical", "paged"})
-    normalized = parsed._replace(query="").geturl()  
-    return (normalized, query_params)
+    return urldefrag(url)[0]
+    # parsed = urlparse(url)
+    # query_params = frozenset((k, tuple(v)) for k, v in parse_qs(parsed.query).items() if k not in {"tribe-bar-date", "eventDate", "ical", "paged"})
+    # normalized = parsed._replace(query="").geturl()  
+    # return (normalized, query_params)
+
 seenUrls = set()  
 word_counter = Counter()  
 subdomain_count = {}  
@@ -62,66 +64,97 @@ simhash_cache = {}
 def scraper(url, resp):
     global seenUrls, word_counter, subdomain_count, longest_page
 
-    clean_url = urldefrag(url)[0]
+    # clean_url = urldefrag(url)[0]
     
-    # 1. 过滤 404 页面
-    if resp.status in [404, 608]:
+    
+    
+    # normalized_url, query_params = normalize_url(url)
+    if resp.status in [404, 608, 403, 500]:
+        print(f"404 skip:{url}")
+        return []
+    normalized_url = normalize_url(url)
+    
+    
+    if (normalized_url) in seenUrls:
+        print(f"seen{normalized_url}")
         return []
     
-    normalized_url, query_params = normalize_url(url)
-    # 2. 避免重复访问
-    if (normalized_url, query_params) in seenUrls:
+    
+    
+    
+    if resp.raw_response is None:
+        print(f"http no responce: {url}")
         return []
-    seenUrls.add((normalized_url, query_params))
+    content_type = resp.raw_response.headers.get("Content-Type", "").lower()
+    blocked_types = [
+        
+            "application/pdf", "application/msword",
+            "application/vnd.openxmlformats-officedocument",
+            "application/vnd.ms-excel", "application/vnd.ms-powerpoint",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            
+           
+            "application/octet-stream", "application/x-gzip", "application/x-tar",
+            "application/zip", "application/x-rar-compressed",
+            "application/x-7z-compressed", "application/x-bzip2",
+            
+            
+            "audio/mpeg", "audio/wav", "audio/ogg",
+            "video/mp4", "video/mpeg", "video/quicktime",
+            "image/png", "image/jpeg", "image/gif", "image/tiff", "image/bmp",
+            
+            
+            "application/javascript", "application/x-sh",
+            "application/x-binary", "application/x-executable",
+            "application/x-msdownload", "application/x-iso9660-image",
+            "application/x-dosexec", "application/x-bzip",
+            "application/x-msi", "application/x-ms-shortcut"
+    ]
+    if any(ext in content_type for ext in blocked_types):
+        print(f"file type skip ({content_type}),skip: {url}")
+        return []
+    seenUrls.add((normalized_url))
 
-    # 3. 解析 HTML 内容
+    
     links, word_count = extract_next_links(url, resp)
 
 
-   # **4. 计算当前页面的 SimHash**
-    text = " ".join(word_count)  # 重新组合文本
+   
+    text = " ".join(word_count)  
     page_simhash = simhash(text)
 
-    # **5. 近似重复检测**
+    
     for old_url, old_hash in simhash_cache.items():
-        if hamming_distance(page_simhash, old_hash) < 5:  # 设定汉明距离阈值
-            print(f"⚠️ {url} 与 {old_url} 是近似重复页面，跳过！")
+        if hamming_distance(page_simhash, old_hash) < 5:  
+            print(f"⚠️ {url} and {old_url} are near same, skip")
             return []
 
-    # **6. 存储当前页面的 SimHash**
+    
     simhash_cache[url] = page_simhash
 
-    # **7. 统计单词数量**
+    
     word_counter.update(word_count)
 
-    # **8. 记录最长的页面**
+    
     if word_count and len(word_count) > longest_page["word_count"]:
         longest_page["url"] = url
         longest_page["word_count"] = len(word_count)
 
-    # **9. 统计 ics.uci.edu 子域名**
+    
     parsed = urlparse(url)
     if "ics.uci.edu" in parsed.netloc:
         subdomain_count[parsed.netloc] = subdomain_count.get(parsed.netloc, 0) + 1
 
     if len(seenUrls) % 1000 == 0:
-        print(f"✅ 已爬取页面数: {len(seenUrls)}, 发现单词数: {len(word_counter)}")
+        print(f"found: {len(seenUrls)}, words in total: {len(word_counter)}")
 
     # return [link for link in links if is_valid(link)]
 
 
 
     return [link for link in links if is_valid(link) and resp.status not in [404, 608]]
-    # global seenUrls
-
-    # # 1. 先去掉 fragment，防止重复爬取相同页面
-    # clean_url = urldefrag(url)[0]
-    # if clean_url in seenUrls:
-    #     return []
-    # seenUrls.add(clean_url)
-
-    # links = extract_next_links(url, resp)
-    # return [link for link in links if is_valid(link)]
+   
 
 def extract_next_links(url, resp):
     # Implementation required.
@@ -139,34 +172,25 @@ def extract_next_links(url, resp):
     if resp.status != 200 or resp.raw_response is None:
         return links, word_count
 
-    soup = BeautifulSoup(resp.raw_response.content, "html.parser")
+    soup = BeautifulSoup(resp.raw_response.content, "lxml")
 
-    # 1. 统计页面中的单词
-    text = soup.get_text()
-    words = re.findall(r"\b[a-zA-Z]{2,}\b", text.lower())  # 仅统计 2 个字母以上的单词
-    word_count = [word for word in words if word not in STOP_WORDS]  # 过滤掉常见停用词
+    
+    text = soup.get_text().lower()
+    words = re.findall(r"\b[a-zA-Z]{2,}\b", text.lower())  
+    word_count = [word for word in words if word not in STOP_WORDS]  
 
-    # 2. 提取超链接
+    
     for tag in soup.find_all("a"):
         href = tag.get("href")
         if href:
-            absolute_url = urljoin(url, href)  # 处理相对路径
-            clean_url = urldefrag(absolute_url)[0]  # 去掉 fragment
+            absolute_url = urljoin(url, href)  
+            clean_url = urldefrag(absolute_url)[0]  
+            
             links.append(clean_url)
+            # links.append(clean_url)
 
     return links, word_count
-    # links = []
-    # if resp.status != 200 or resp.raw_response is None:
-    #     return links
     
-    # soup = BeautifulSoup(resp.raw_response.content, "html.parser")
-    # for tag in soup.find_all("a"):
-    #     href = tag.get("href")
-    #     if href:
-    #         absoluteUrl = urljoin(url, href)
-    #         cleanUrl = urldefrag(absoluteUrl)[0]
-    #         links.append(cleanUrl)
-    # return links
 
 def is_valid(url):
     # Decide whether to crawl this url or not. 
@@ -174,16 +198,33 @@ def is_valid(url):
     # There are already some conditions that return False.
     parsed = urlparse(url)
 
-    # 1. 仅允许 HTTP 和 HTTPS 协议
+   
     if parsed.scheme not in {"http", "https"}:
         return False
 
-    # 2. 仅爬取 UCI 相关域名
+    
     allowed_domains = {"ics.uci.edu", "cs.uci.edu", "informatics.uci.edu", "stat.uci.edu"}
     if not any(parsed.netloc.endswith(domain) for domain in allowed_domains):
         return False
+    
+    if any(keyword in parsed.path.lower() for keyword in ["404", "not found"]):#new
+        return False
 
-    # 3. 过滤无用文件类型
+    if parsed.netloc == "grape.ics.uci.edu":
+        if parsed.path == "/" or parsed.path == "":  
+            return True
+        else:
+            print(f"skip grape.ics.uci.edu others: {url}")
+            return False
+    
+
+    if parsed.netloc == "ngs.ics.uci.edu":
+        if parsed.path == "/" or parsed.path == "":
+            return True
+        else:
+            print(f"skip ngs.ics.uci.edu others: {url}")
+            return False
+    
     if re.search(
         r"\.(css|js|bmp|gif|jpe?g|ico"
         r"|png|tiff?|mid|mp2|mp3|mp4"
@@ -192,62 +233,47 @@ def is_valid(url):
         r"|data|dat|exe|bz2|tar|msi|bin|7z|psd|dmg|iso"
         r"|epub|dll|cnf|tgz|sha1"
         r"|thmx|mso|arff|rtf|jar|csv"
-        r"|rm|smil|wmv|swf|wma|zip|rar|gz)$", parsed.path.lower()):
+        r"|rm|smil|wmv|swf|wma|zip|rar|gz|bib|img|apk|war|txt|lif)$", parsed.path.lower()):
         return False
 
-    # 4. 过滤常见无用的 URL 参数
-    # blacklist_keywords = ["?ical=", "eventDisplay=past", "page=", "/tag/", "/author=", 
-    #     "?filter=", "?sort=", "?session=", "?category=", "?set=", 
-    #     "&filter=", "&sort=", "&session=", "&category=", "&set=", r"[\?&]filter%"]
-    # if any(keyword in parsed.path or keyword in parsed.query for keyword in blacklist_keywords):
-    #     return False
+
     decoded_query = unquote(parsed.query)
 
-    # 解析 query 并检查黑名单
+    
     query_params = parse_qs(decoded_query)
     blacklisted_keys = {"filter", "sort", "category", "session", "eventDisplay", "paged", "tribe-bar-date", "eventDate", "ical"}
 
-    # **检查 query 参数是否包含黑名单**
+   
     if any(key in query_params for key in blacklisted_keys):
         return False
 
-    # **检查解码后的 query 是否仍然包含 `filter[`**
+    
     if "filter[" in decoded_query:
         return False
-    # query_params = parse_qs(parsed.query)  # 解析 query 参数为字典
-    # blacklisted_keys = {"filter", "sort", "category", "session"}  # 需要屏蔽的参数
-    # if any(key in query_params for key in blacklisted_keys):
-    #     return False
+    
+    blocked_keywords = ["pdf", "git/?p=iot2.git", "/git", "doku.php", "/pix", "/hotshots", "/supplement"]
+
+
+    matched_keyword = next((kw for kw in blocked_keywords if kw in url.lower()), None)
+
+    if matched_keyword:
+        print(f"skip '{matched_keyword}'  URL: {url}")
+        return False
+
 
     return True
-    # try:
-    #     parsed = urlparse(url)
-    #     if parsed.scheme not in set(["http", "https"]):
-    #         return False
-    #     return not re.match(
-    #         r".*\.(css|js|bmp|gif|jpe?g|ico"
-    #         + r"|png|tiff?|mid|mp2|mp3|mp4"
-    #         + r"|wav|avi|mov|mpeg|ram|m4v|mkv|ogg|ogv|pdf"
-    #         + r"|ps|eps|tex|ppt|pptx|doc|docx|xls|xlsx|names"
-    #         + r"|data|dat|exe|bz2|tar|msi|bin|7z|psd|dmg|iso"
-    #         + r"|epub|dll|cnf|tgz|sha1"
-    #         + r"|thmx|mso|arff|rtf|jar|csv"
-    #         + r"|rm|smil|wmv|swf|wma|zip|rar|gz)$", parsed.path.lower())
-
-    # except TypeError:
-    #     print ("TypeError for ", parsed)
-    #     raise
+    
 
 
 def print_summary():
-    print(f"\n🚀 Crawling Summary 🚀")
+    print(f"\n Crawling Summary")
     print(f"Total Unique Pages: {len(seenUrls)}")
     print(f"Longest Page: {longest_page['url']} ({longest_page['word_count']} words)")
-    print("\n📌 Top 50 Words:")
+    print("\n Top 50 Words:")
     for word, count in word_counter.most_common(50):
         print(f"{word}: {count}")
 
-    print("\n🌐 ICS Subdomains:")
+    print("\n ICS Subdomains:")
     for domain, count in sorted(subdomain_count.items()):
         print(f"{domain}, {count}")
 
