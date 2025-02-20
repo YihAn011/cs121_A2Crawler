@@ -109,7 +109,7 @@ def scraper(url, resp):
     print(f"Total unique pages seen: {len(alredySeenURL)}")
 
     parsed = urlparse(url)
-    if parsed.netloc.endswith("ics.uci.edu"):
+    if parsed.netloc.endswith(".ics.uci.edu"):#use .ics.uci.edu not ics.uci.edu
         if parsed.netloc not in subdUnique:
             subdUnique[parsed.netloc] = set()
         subdUnique[parsed.netloc].add(normalized_url)
@@ -124,7 +124,7 @@ def scraper(url, resp):
     
     for old_url, old_hash in simCache.items():#skip or not for simhash
         if hamDis(simForPage, old_hash) < 5:  
-            print(f"⚠️ {url} and {old_url} are near same, skip")
+            print(f"{url} and {old_url} are near same, skip")
             return []
 
     
@@ -201,7 +201,9 @@ def is_valid(url):
 
     
     domainOk = {"ics.uci.edu", "cs.uci.edu", "informatics.uci.edu", "stat.uci.edu"}
-    if not any(parsed.netloc.endswith(domain) for domain in domainOk):
+    if parsed.netloc not in domainOk and not any(
+        parsed.netloc == "www." + domain or parsed.netloc.endswith("." + domain) for domain in domainOk):
+        print(f"Skipping non-allowed domain: {url}") 
         return False
     
     if any(keyword in parsed.path.lower() for keyword in ["404", "not found"]):#new
