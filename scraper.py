@@ -6,8 +6,8 @@ from collections import Counter
 from urllib.parse import parse_qs, unquote
 import atexit
 import hashlib
-
-def simhash(text, hash_bits=64):
+#simhash calculation
+def simhash(text, hBits=64):
     words = text.split()
     weights = {}
     
@@ -16,39 +16,41 @@ def simhash(text, hash_bits=64):
         weights[word] = weights.get(word, 0) + 1
 
     
-    hash_vector = [0] * hash_bits
+    hVec = [0] * hBits
 
     for word, weight in weights.items():
        
-        hash_value = int(hashlib.md5(word.encode()).hexdigest(), 16)  
-        hash_value = hash_value & ((1 << hash_bits) - 1)  
+        hashValue = int(hashlib.md5(word.encode()).hexdigest(), 16)  
+        hashValue = hashValue & ((1 << hBits) - 1)  
 
-        for i in range(hash_bits):
+        for i in range(hBits):
             
-            bit = 1 if (hash_value & (1 << i)) else -1
+            bit = 1 if (hashValue & (1 << i)) else -1
             
-            hash_vector[i] += bit * weight
+            hVec[i] += bit * weight
 
 
-    simhash_value = 0
-    for i in range(hash_bits):
-        if hash_vector[i] > 0:
-            simhash_value |= (1 << i)  
+    simValue = 0
+    for i in range(hBits):
+        if hVec[i] > 0:
+            simValue |= (1 << i)  
 
-    return simhash_value
+    return simValue
 
-def hamming_distance(hash1, hash2):
+#hamming distance
+def hamDis(hash1, hash2):
     x = hash1 ^ hash2  
     return bin(x).count('1')  
 
+#cut fragments
 def normalize_url(url):
     return urldefrag(url)[0]
 
-seenUrls = set()  
-word_counter = Counter()  
-subdomain_unique_urls = {}
-subdomain_count = {}  
-longest_page = {"url": None, "word_count": 0}  
+alredySeenURL = set()  
+wordCount = Counter()  
+subdUnique = {}
+subC = {}  
+longestPage = {"url": None, "word_count": 0}  
 STOP_WORDS = {
     "the", "and", "a", "an", "to", "is", "in", "that", "it", "on", "for", "with",
     "as", "was", "at", "by", "this", "from", "or", "be", "are", "of", "not", "but",
@@ -56,10 +58,10 @@ STOP_WORDS = {
     "have", "has", "they", "their", "there", "some", "my", "our", "more", "will",
     "would", "should", "could"
 }
-simhash_cache = {}
+simCache = {}
 
 def scraper(url, resp):
-    global seenUrls, word_counter, subdomain_count, longest_page, subdomain_unique_urls
+    global alredySeenURL, wordCount, subC, longestPage, subdUnique
 
     if resp.status in [404, 608, 403, 500]:
         print(f"404 skip:{url}")
@@ -67,14 +69,14 @@ def scraper(url, resp):
     normalized_url = normalize_url(url)
     
     
-    if (normalized_url) in seenUrls:
+    if (normalized_url) in alredySeenURL:
         print(f"seen{normalized_url}")
         return []
     
     if resp.raw_response is None:
         print(f"http no responce: {url}")
         return []
-    content_type = resp.raw_response.headers.get("Content-Type", "").lower()
+    content_type = resp.raw_response.headers.get("Content-Type", "").lower()#check type
     blocked_types = [
         
             "application/pdf", "application/msword",
@@ -103,46 +105,46 @@ def scraper(url, resp):
     if any(ext in content_type for ext in blocked_types):
         print(f"file type skip ({content_type}),skip: {url}")
         return []
-    seenUrls.add((normalized_url))
-    print(f"Total unique pages seen: {len(seenUrls)}")
+    alredySeenURL.add((normalized_url))
+    print(f"Total unique pages seen: {len(alredySeenURL)}")
 
     parsed = urlparse(url)
     if parsed.netloc.endswith("ics.uci.edu"):
-        if parsed.netloc not in subdomain_unique_urls:
-            subdomain_unique_urls[parsed.netloc] = set()
-        subdomain_unique_urls[parsed.netloc].add(normalized_url)
+        if parsed.netloc not in subdUnique:
+            subdUnique[parsed.netloc] = set()
+        subdUnique[parsed.netloc].add(normalized_url)
     
     links, word_count = extract_next_links(url, resp)
 
 
    
     text = " ".join(word_count)  
-    page_simhash = simhash(text)
+    simForPage = simhash(text)#get simhash
 
     
-    for old_url, old_hash in simhash_cache.items():
-        if hamming_distance(page_simhash, old_hash) < 5:  
+    for old_url, old_hash in simCache.items():#skip or not for simhash
+        if hamDis(simForPage, old_hash) < 5:  
             print(f"⚠️ {url} and {old_url} are near same, skip")
             return []
 
     
-    simhash_cache[url] = page_simhash
+    simCache[url] = simForPage
+
+    #word,subdomain, info count
+    wordCount.update(word_count)
 
     
-    word_counter.update(word_count)
-
-    
-    if word_count and len(word_count) > longest_page["word_count"]:
-        longest_page["url"] = url
-        longest_page["word_count"] = len(word_count)
+    if word_count and len(word_count) > longestPage["word_count"]:
+        longestPage["url"] = url
+        longestPage["word_count"] = len(word_count)
 
     
     parsed = urlparse(url)
     if "ics.uci.edu" in parsed.netloc:
-        subdomain_count[parsed.netloc] = subdomain_count.get(parsed.netloc, 0) + 1
+        subC[parsed.netloc] = subC.get(parsed.netloc, 0) + 1
 
-    if len(seenUrls) % 1000 == 0:
-        print(f"found: {len(seenUrls)}, words in total: {len(word_counter)}")
+    if len(alredySeenURL) % 1000 == 0:
+        print(f"found: {len(alredySeenURL)}, words in total: {len(wordCount)}")
 
     # return [link for link in links if is_valid(link)]
 
@@ -171,7 +173,7 @@ def extract_next_links(url, resp):
 
     
     text = soup.get_text().lower()
-    words = re.findall(r"\b[a-zA-Z]{2,}\b", text.lower())  
+    words = re.findall(r"\b[a-zA-Z]{2,}\b", text.lower())  #2 or more
     word_count = [word for word in words if word not in STOP_WORDS]  
 
     
@@ -198,8 +200,8 @@ def is_valid(url):
         return False
 
     
-    allowed_domains = {"ics.uci.edu", "cs.uci.edu", "informatics.uci.edu", "stat.uci.edu"}
-    if not any(parsed.netloc.endswith(domain) for domain in allowed_domains):
+    domainOk = {"ics.uci.edu", "cs.uci.edu", "informatics.uci.edu", "stat.uci.edu"}
+    if not any(parsed.netloc.endswith(domain) for domain in domainOk):
         return False
     
     if any(keyword in parsed.path.lower() for keyword in ["404", "not found"]):#new
@@ -227,7 +229,7 @@ def is_valid(url):
             print(f"Skipping other grape.ics.uci.edu pages: {url}")
             return False
     
-
+    #avoid trap
     if parsed.netloc == "ngs.ics.uci.edu":
         if parsed.path == "/" or parsed.path == "":
             return True
@@ -256,7 +258,7 @@ def is_valid(url):
         r"|data|dat|exe|bz2|tar|msi|bin|7z|psd|dmg|iso"
         r"|epub|dll|cnf|tgz|sha1"
         r"|thmx|mso|arff|rtf|jar|csv"
-        r"|rm|smil|wmv|swf|wma|zip|rar|gz|bib|img|apk|war|txt|lif)$", parsed.path.lower()):
+        r"|rm|smil|wmv|swf|wma|zip|rar|gz|bib|img|apk|war|txt|lif)$", parsed.path.lower()):#add more file type
         return False
 
 
@@ -290,17 +292,14 @@ def is_valid(url):
 
 def print_summary():
     print(f"\n Crawling Summary")
-    print(f"Total Unique Pages: {len(seenUrls)}")
-    print(f"Longest Page: {longest_page['url']} ({longest_page['word_count']} words)")
+    print(f"Total Unique Pages: {len(alredySeenURL)}")
+    print(f"Longest Page: {longestPage['url']} ({longestPage['word_count']} words)")
     print("\n Top 50 Words:")
-    for word, count in word_counter.most_common(50):
+    for word, count in wordCount.most_common(50):
         print(f"{word}: {count}")
 
-    # print("\n ICS Subdomains:")
-    # for domain, count in sorted(subdomain_count.items()):
-    #     print(f"{domain}, {count}")
     print("\nICS Subdomains (Unique Pages Count):")
-    for subdomain in sorted(subdomain_unique_urls.keys()):  
-        print(f"http://{subdomain}, {len(subdomain_unique_urls[subdomain])}")
+    for subdomain in sorted(subdUnique.keys()):  
+        print(f"http://{subdomain}, {len(subdUnique[subdomain])}")
 
 atexit.register(print_summary)
