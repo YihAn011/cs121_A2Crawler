@@ -1,266 +1,242 @@
 import re
-import string
-from urllib.parse import urlparse, urljoin, urldefrag
-from collections import Counter, deque
+from urllib.parse import urlparse, urljoin, urldefrag, parse_qs, unquote
 from bs4 import BeautifulSoup
+from collections import Counter
+import atexit
+import hashlib
 
-# 全局变量
-unique_pages = set()              # 保存已访问的 URL（去除 fragment）
-page_count = 0                    # 爬取页面总数
-longest_page_word_count = 0       # 单词数最多页面的单词数
-longest_page_url = ""             # 单词数最多页面的 URL
-word_frequency = Counter()        # 全局单词频率统计
-ics_subdomains = {}               # ICS 子域页面数（仅统计唯一页面）
+# SimHash calculation function
+# SimHash计算函数
+# Purpose: Generate a 64-bit hash (SimHash) for a given text to identify near-duplicate content.
+# 作用：为给定文本生成64位的哈希值（SimHash），用于识别近似重复的内容。
+def simhash(text, hBits=64):
+    """
+    Calculate SimHash for the given text.
+    计算给定文本的SimHash值。
 
-# 为避免 SimHash 内存问题，只保留最近 1000 个页面的指纹
-page_simhashes = deque(maxlen=1000)
+    Steps:
+    步骤：
+    1. Split text into words and count the frequency of each word.
+    1. 将文本拆分为单词，并计算每个单词的频率。
+    2. Hash each word using MD5 and convert it into a 64-bit integer.
+    2. 使用MD5对每个单词进行哈希，并将其转换为64位整数。
+    3. Create a hash vector where each bit position is adjusted based on word frequency.
+    3. 创建哈希向量，并根据单词频率调整每个位的位置。
+    4. Generate the final SimHash by setting bits to 1 if the corresponding vector value is positive.
+    4. 如果对应向量值为正，则将该位设置为1，生成最终的SimHash。
 
-# 限制 Wiki 页面与子域页数
-max_wiki_pages = 200 
-wiki_count = 0
-max_pages_per_subdomain = 500   # 每个子域最多爬取 500 页
-subdomain_counts = {}           # 计数每个子域的爬取页数
-blocked_subdomains = set()      # 超过限制的子域，将终止后续请求
+    Args:
+    参数：
+        text (str): Input text for hash calculation.
+        text (str)：用于哈希计算的输入文本。
+        hBits (int): Number of bits for the hash, default is 64.
+        hBits (int)：哈希的位数，默认为64。
 
-# 停用词（增加了无意义导航词）
+    Returns:
+    返回：
+        int: The calculated SimHash value.
+        int：计算得到的SimHash值。
+    """
+    words = text.split()
+    weights = Counter(words)  # Count word frequency 统计单词频率
+
+    hVec = [0] * hBits  # Initialize hash vector 初始化哈希向量
+
+    for word, weight in weights.items():
+        hashValue = int(hashlib.md5(word.encode()).hexdigest(), 16) & ((1 << hBits) - 1)
+        for i in range(hBits):
+            bit = 1 if (hashValue & (1 << i)) else -1
+            hVec[i] += bit * weight
+
+    simValue = 0
+    for i in range(hBits):
+        if hVec[i] > 0:
+            simValue |= (1 << i)
+
+    return simValue
+
+
+# Hamming Distance calculation function
+# 汉明距离计算函数
+# Purpose: Calculate the number of differing bits between two SimHash values.
+# 作用：计算两个SimHash值之间不同位的数量。
+def hamDis(hash1, hash2):
+    """
+    Calculate the Hamming distance between two SimHash values.
+    计算两个SimHash值之间的汉明距离。
+
+    Args:
+    参数：
+        hash1 (int): First SimHash value.
+        hash1 (int)：第一个SimHash值。
+        hash2 (int): Second SimHash value.
+        hash2 (int)：第二个SimHash值。
+
+    Returns:
+    返回：
+        int: The Hamming distance (number of differing bits).
+        int：汉明距离（不同位的数量）。
+    """
+    return bin(hash1 ^ hash2).count('1')
+
+
+# Normalize URL by removing fragments
+# 通过移除片段来规范化URL
+# Purpose: Ensure consistent URL comparison by stripping fragments ("#" part).
+# 作用：通过移除片段（“#”部分）来保证URL比较的一致性。
+def normalize_url(url):
+    """
+    Normalize the URL by removing fragments.
+    通过移除片段来规范化URL。
+
+    Args:
+    参数：
+        url (str): Input URL.
+        url (str)：输入的URL。
+
+    Returns:
+    返回：
+        str: Normalized URL without fragments.
+        str：去除片段后的规范化URL。
+    """
+    return urldefrag(url)[0]
+
+
+# Global variables for tracking crawling state
+# 用于跟踪爬取状态的全局变量
+alredySeenURL = set()  # Set to store unique URLs 存储唯一URL的集合
+wordCount = Counter()  # Counter to track word frequency 统计单词频率的计数器
+subdUnique = {}        # Dictionary to store unique pages per subdomain 存储每个子域名唯一页面的字典
+subC = {}              # Subdomain page count 子域页面计数
+longestPage = {"url": None, "word_count": 0}  # Longest page tracker 记录最长页面
 STOP_WORDS = {
-    "a", "an", "the", "and", "or", "in", "on", "at", "to", "of", "for", "by", 
-    "is", "are", "was", "were", "this", "that", "it", "with", "as", "from",
-    "up", "next", "prev", "size", "image", "original"
+    "the", "and", "a", "an", "to", "is", "in", "that", "it", "on", "for", "with",
+    "as", "was", "at", "by", "this", "from", "or", "be", "are", "of", "not", "but",
+    "we", "can", "if", "so", "about", "all", "one", "you", "your", "which",
+    "have", "has", "they", "their", "there", "some", "my", "our", "more", "will",
+    "would", "should", "could"
 }
+simCache = {}  # Cache to store SimHash values of visited pages 存储已访问页面SimHash值的缓存
 
-def is_valid_word(word):
-    """过滤单词：剔除单字母、纯数字以及全是符号的单词"""
-    if len(word) == 1:
-        return False
-    if word.isdigit():
-        return False  
-    if re.match(r"^[^a-zA-Z0-9]+$", word):
-        return False  
-    return True
 
-def is_low_value_page(url, text):
-    """
-    判断是否为低价值页面：
-    - Wiki 页面超过限制数量；
-    - seminar-series 页面（包含特定年份格式）视为低价值。
-    """
-    global wiki_count
-    if "wiki.ics.uci.edu" in url:
-        wiki_count += 1
-        if wiki_count > max_wiki_pages:
-            print(f"🚀 Skipping excessive Wiki page: {url}")
-            return True
-    if "seminar-series" in url and re.search(r"20\d{2}-20\d{2}", url):
-        print(f"🚀 Skipping low-value seminar page: {url}")
-        return True
-    return False
-
-def is_exceeding_subdomain_limit(url):
-    """
-    判断是否超过单个子域最大爬取页数：
-    如果该子域已在 blocked_subdomains 中，则直接返回 True，
-    否则累加计数，超过限制后将其加入 blocked_subdomains 并返回 True。
-    """
-    global subdomain_counts, blocked_subdomains
-    parsed = urlparse(url)
-    subdomain = parsed.netloc
-    if subdomain in blocked_subdomains:
-        return True
-    subdomain_counts[subdomain] = subdomain_counts.get(subdomain, 0) + 1
-    if subdomain_counts[subdomain] > max_pages_per_subdomain:
-        print(f"🚀 Terminating crawl for subdomain {subdomain} (limit {max_pages_per_subdomain} reached)")
-        blocked_subdomains.add(subdomain)
-        return True
-    return False
-
-def is_large_page(text, url):
-    """跳过超大页面（超过 10,000 词的页面）"""
-    word_count = len(re.findall(r"\w+", text))
-    if word_count > 10000:
-        print(f"🚀 Skipping large page: {word_count} words, {url}")
-        return True
-    return False
-
-def is_valid(url):
-    """
-    检查 URL 是否符合爬取条件：
-    1. 移除所有动态参数（只保留 scheme://netloc/path）。
-    2. 协议必须为 http/https。
-    3. 域名必须属于允许范围。
-    4. 屏蔽图片库、相册、幻灯片等页面。
-    5. 过滤非 HTML 文件（包括 .txt、.apk、.zip 等）。
-    """
-    try:
-        parsed = urlparse(url)
-        # 移除所有动态参数，保留 scheme://netloc/path
-        normalized_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-        parsed = urlparse(normalized_url)
-        if parsed.scheme not in {"http", "https"}:
-            return False
-
-        allowed_domains = ("ics.uci.edu", "cs.uci.edu", "informatics.uci.edu", "stat.uci.edu")
-        if not any(parsed.netloc.endswith(domain) for domain in allowed_domains):
-            return False
-
-        # 屏蔽图片库、相册、幻灯片等页面
-        gallery_keywords = ["gallery", "album", "slideshow"]
-        if any(keyword in parsed.path.lower() for keyword in gallery_keywords):
-            return False
-
-        # 过滤非 HTML 文件（新增 .txt、.apk 等）
-        if re.match(
-            r".*\.(css|js|bmp|gif|jpe?g|ico"
-            r"|png|tiff?|mid|mp2|mp3|mp4"
-            r"|wav|avi|mov|mpeg|ram|m4v|mkv|ogg|ogv|pdf|txt|apk"
-            r"|ps|eps|tex|ppt|pptx|doc|docx|xls|xlsx|names"
-            r"|data|dat|exe|bz2|tar|msi|bin|7z|psd|dmg|iso"
-            r"|epub|dll|cnf|tgz|sha1"
-            r"|thmx|mso|arff|rtf|jar|csv"
-            r"|rm|smil|wmv|swf|wma|zip|rar|gz|log)$",
-            parsed.path.lower()
-        ):
-            return False
-
-        return True
-    except TypeError:
-        print("TypeError for", url)
-        return False
-
-def extract_next_links(url, resp):
-    """从页面中提取所有链接，并转换为绝对 URL（同时去除锚点）"""
-    extracted_links = []
-    if resp.status != 200:
-        return extracted_links
-    try:
-        html_content = resp.raw_response.content
-    except AttributeError:
-        return extracted_links
-
-    soup = BeautifulSoup(html_content, "html.parser")
-    for tag in soup.find_all("a"):
-        href = tag.get("href")
-        if href:
-            absolute_url = urljoin(resp.url, href)
-            defragged_url, _ = urldefrag(absolute_url)
-            extracted_links.append(defragged_url)
-    return extracted_links
-
-def compute_simhash(text, hash_bits=64):
-    """
-    计算文本的 SimHash 指纹：
-    1. 简单分词，并仅保留有效单词。
-    2. 对每个单词计算 hash 值，然后对每一位累加权值。
-    3. 根据累加结果构建指纹（正则记为 1，否则为 0）。
-    """
-    tokens = re.findall(r'\w+', text.lower())
-    tokens = [token for token in tokens if is_valid_word(token)]
-    vector = [0] * hash_bits
-    for token in tokens:
-        token_hash = hash(token)
-        for i in range(hash_bits):
-            bitmask = 1 << i
-            if token_hash & bitmask:
-                vector[i] += 1
-            else:
-                vector[i] -= 1
-    fingerprint = 0
-    for i in range(hash_bits):
-        if vector[i] > 0:
-            fingerprint |= (1 << i)
-    return fingerprint
-
-def hamming_distance(hash1, hash2):
-    """计算两个 SimHash 指纹之间的 Hamming 距离"""
-    x = hash1 ^ hash2
-    distance = 0
-    while x:
-        distance += 1
-        x &= x - 1
-    return distance
-
+# Main scraper function
+# 主要的爬虫函数
+# Purpose: Process a given URL, extract links, detect duplicates, and count words.
+# 作用：处理给定的URL，提取链接，检测重复，并统计单词。
 def scraper(url, resp):
     """
-    主爬虫函数：
-    1. URL 去重、更新统计数据；
-    2. 解析页面文本，过滤低价值、超大、近重复以及内容太少的页面；
-    3. 更新单词频率、最长页面及 ICS 子域统计；
-    4. 返回页面中符合条件的链接。
+    Scrape the given URL, extract links, and analyze content.
+    爬取给定的URL，提取链接，并分析内容。
+
+    Steps:
+    步骤：
+    1. Check the response status and content type.
+    1. 检查响应状态和内容类型。
+    2. Skip previously visited or invalid URLs.
+    2. 跳过已访问或无效的URL。
+    3. Calculate SimHash and skip near-duplicate pages.
+    3. 计算SimHash并跳过近似重复的页面。
+    4. Extract hyperlinks and count words.
+    4. 提取超链接并统计单词。
+    5. Update statistics for word count, subdomains, and longest page.
+    5. 更新单词统计、子域名和最长页面的统计信息。
+
+    Args:
+    参数：
+        url (str): The URL being scraped.
+        url (str)：正在爬取的URL。
+        resp (Response): The response object containing page content.
+        resp (Response)：包含页面内容的响应对象。
+
+    Returns:
+    返回：
+        list: List of valid links extracted from the page.
+        list：从页面中提取的有效链接列表。
     """
-    global unique_pages, page_count, longest_page_word_count, longest_page_url
-    global word_frequency, ics_subdomains, page_simhashes
+    global alredySeenURL, wordCount, subC, longestPage, subdUnique
 
-    url_no_fragment, _ = urldefrag(url)
-    if url_no_fragment in unique_pages:
+    # Skip invalid response codes 跳过无效的响应代码
+    if resp.status in [404, 608, 403, 500]:
+        print(f"Skipping due to error {resp.status}: {url}")
         return []
-    unique_pages.add(url_no_fragment)
-    page_count += 1
 
-    if resp.status == 200 and hasattr(resp, "raw_response") and resp.raw_response:
-        try:
-            html_content = resp.raw_response.content
-            soup = BeautifulSoup(html_content, "html.parser")
-            text = soup.get_text(separator=" ", strip=True)
+    normalized_url = normalize_url(url)
+    if normalized_url in alredySeenURL:
+        print(f"Already seen: {normalized_url}")
+        return []
 
-            # 跳过低价值页面与超大页面
-            if is_low_value_page(url_no_fragment, text):
-                return []
-            if is_large_page(text, url_no_fragment):
-                return []
+    if resp.raw_response is None:
+        print(f"No raw response: {url}")
+        return []
 
-            # 网页指纹检测，避免精确或近似重复页面
-            simhash_val = compute_simhash(text)
-            for existing_simhash in page_simhashes:
-                if hamming_distance(simhash_val, existing_simhash) <= 3:
-                    print(f"🚀 Skipping near duplicate page: {url_no_fragment}")
-                    return []
-            page_simhashes.append(simhash_val)
+    # Content type filtering (skip non-HTML content)
+    # 内容类型过滤（跳过非HTML内容）
+    content_type = resp.raw_response.headers.get("Content-Type", "").lower()
+    blocked_types = [
+        "application/pdf", "application/msword", "audio/mpeg", "video/mp4",
+        "image/png", "image/jpeg", "application/zip", "application/x-gzip"
+    ]
+    if any(ext in content_type for ext in blocked_types):
+        print(f"Skipping blocked content type ({content_type}): {url}")
+        return []
 
-            if is_exceeding_subdomain_limit(url_no_fragment):
-                return []
+    # Mark URL as seen 将URL标记为已访问
+    alredySeenURL.add(normalized_url)
+    print(f"Total unique pages seen: {len(alredySeenURL)}")
 
-            # 统计有效单词数（过滤停用词和无效单词）
-            words = re.findall(r"\w+", text.lower())
-            filtered_words = [w for w in words if w not in STOP_WORDS and is_valid_word(w)]
-            # 如果有效单词数过少，则认为页面无实质内容
-            if len(filtered_words) < 50:
-                print(f"🚀 Skipping low-content page: {url_no_fragment}")
-                return []
+    # Track subdomain occurrences 统计子域名出现次数
+    parsed = urlparse(url)
+    if parsed.netloc.endswith(".ics.uci.edu"):
+        subdUnique.setdefault(parsed.netloc, set()).add(normalized_url)
 
-            # 可选：如检测页面中导航词占比较高，则跳过（导航页面）
-            NAV_TERMS = {"up", "next", "prev", "size", "image", "original"}
-            if filtered_words:
-                nav_count = sum(1 for w in filtered_words if w in NAV_TERMS)
-                if (nav_count / len(filtered_words)) > 0.1:
-                    print(f"🚀 Skipping navigation heavy page: {url_no_fragment}")
-                    return []
+    # Extract links and words 提取链接和单词
+    links, word_count = extract_next_links(url, resp)
+    text = " ".join(word_count)
+    simForPage = simhash(text)
 
-            current_word_count = len(filtered_words)
-            if current_word_count > longest_page_word_count:
-                longest_page_word_count = current_word_count
-                longest_page_url = url_no_fragment
+    # Check for near-duplicate pages using SimHash
+    # 使用SimHash检查近似重复的页面
+    for old_url, old_hash in simCache.items():
+        if hamDis(simForPage, old_hash) < 5:
+            print(f"Duplicate detected: {url} and {old_url}")
+            return []
 
-            word_frequency.update(filtered_words)
+    # Store SimHash for future comparisons
+    # 存储SimHash以供未来比较
+    simCache[url] = simForPage
 
-            parsed = urlparse(url_no_fragment)
-            if parsed.netloc.endswith("ics.uci.edu"):
-                ics_subdomains[parsed.netloc] = ics_subdomains.get(parsed.netloc, 0) + 1
+    # Update word count and longest page
+    # 更新单词计数和最长页面
+    wordCount.update(word_count)
+    if word_count and len(word_count) > longestPage["word_count"]:
+        longestPage.update({"url": url, "word_count": len(word_count)})
 
-        except Exception as e:
-            print(f"Error processing page {url_no_fragment}: {e}")
+    # Update subdomain count
+    # 更新子域名计数
+    if "ics.uci.edu" in parsed.netloc:
+        subC[parsed.netloc] = subC.get(parsed.netloc, 0) + 1
 
-    links = extract_next_links(url, resp)
     return [link for link in links if is_valid(link)]
-    
-def save_report():
-    with open("crawl_report.txt", "w", encoding="utf-8") as f:
-        f.write("=== Crawler Statistics ===\n")
-        f.write(f"Total unique pages: {len(unique_pages)}\n")
-        f.write(f"Longest page: {longest_page_url}\n")
-        f.write(f"Word count in longest page: {longest_page_word_count}\n\n")
-        f.write("Top 50 most common words (excluding stop words):\n")
-        for word, count in word_frequency.most_common(50):
-            f.write(f"{word}: {count}\n")
-        f.write("\nICS Subdomains (sorted alphabetically):\n")
-        for subdomain, count in sorted(ics_subdomains.items()):
-            f.write(f"{subdomain}: {count}\n")
+
+
+# Link and word extraction function
+# 链接和单词提取函数
+# Purpose: Extract all hyperlinks and non-stop words from a webpage.
+# 作用：从网页中提取所有超链接和非停用词。
+def extract_next_links(url, resp):
+    """
+    Extract hyperlinks and words from the page content.
+    从页面内容中提取超链接和单词。
+
+    Args:
+    参数：
+        url (str): The URL being processed.
+        url (str)：正在处理的URL。
+        resp (Response): The response object containing page content.
+        resp (Response)：包含页面内容的响应对象。
+
+    Returns:
+    返回：
+        tuple: A list of extracted links and a list of non-stop words.
+        tuple：提取的链接列表和非停用词列表。
+    """
