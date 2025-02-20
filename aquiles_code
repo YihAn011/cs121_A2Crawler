@@ -1,32 +1,36 @@
 import re
 import string
 from urllib.parse import urlparse, urljoin, urldefrag
-from collections import Counter
+from collections import Counter, deque
 from bs4 import BeautifulSoup
 
+# 全局变量
+unique_pages = set()              # 保存已访问的 URL（去除 fragment）
+page_count = 0                    # 爬取页面总数
+longest_page_word_count = 0       # 单词数最多页面的单词数
+longest_page_url = ""             # 单词数最多页面的 URL
+word_frequency = Counter()        # 全局单词频率统计
+ics_subdomains = {}               # ICS 子域页面数（仅统计唯一页面）
 
-unique_pages = set()              
-page_count = 0                    
-longest_page_word_count = 0       
-longest_page_url = ""            
-word_frequency = Counter()       
-ics_subdomains = {}           
-page_simhashes = []             
+# 为避免 SimHash 内存问题，只保留最近 1000 个页面的指纹
+page_simhashes = deque(maxlen=1000)
 
-
+# 限制 Wiki 页面与子域页数
 max_wiki_pages = 200 
 wiki_count = 0
-max_pages_per_subdomain = 10000  
-subdomain_counts = {}           
+max_pages_per_subdomain = 500   # 每个子域最多爬取 500 页
+subdomain_counts = {}           # 计数每个子域的爬取页数
+blocked_subdomains = set()      # 超过限制的子域，将终止后续请求
 
-# 停用词
+# 停用词（增加了无意义导航词）
 STOP_WORDS = {
     "a", "an", "the", "and", "or", "in", "on", "at", "to", "of", "for", "by", 
-    "is", "are", "was", "were", "this", "that", "it", "with", "as", "from"
+    "is", "are", "was", "were", "this", "that", "it", "with", "as", "from",
+    "up", "next", "prev", "size", "image", "original"
 }
 
 def is_valid_word(word):
-
+    """过滤单词：剔除单字母、纯数字以及全是符号的单词"""
     if len(word) == 1:
         return False
     if word.isdigit():
@@ -36,7 +40,11 @@ def is_valid_word(word):
     return True
 
 def is_low_value_page(url, text):
-
+    """
+    判断是否为低价值页面：
+    - Wiki 页面超过限制数量；
+    - seminar-series 页面（包含特定年份格式）视为低价值。
+    """
     global wiki_count
     if "wiki.ics.uci.edu" in url:
         wiki_count += 1
@@ -49,16 +57,25 @@ def is_low_value_page(url, text):
     return False
 
 def is_exceeding_subdomain_limit(url):
-    global subdomain_counts
+    """
+    判断是否超过单个子域最大爬取页数：
+    如果该子域已在 blocked_subdomains 中，则直接返回 True，
+    否则累加计数，超过限制后将其加入 blocked_subdomains 并返回 True。
+    """
+    global subdomain_counts, blocked_subdomains
     parsed = urlparse(url)
     subdomain = parsed.netloc
+    if subdomain in blocked_subdomains:
+        return True
     subdomain_counts[subdomain] = subdomain_counts.get(subdomain, 0) + 1
     if subdomain_counts[subdomain] > max_pages_per_subdomain:
-        print(f"🚀 Skipping {subdomain}, exceeded {max_pages_per_subdomain} pages")
+        print(f"🚀 Terminating crawl for subdomain {subdomain} (limit {max_pages_per_subdomain} reached)")
+        blocked_subdomains.add(subdomain)
         return True
     return False
 
 def is_large_page(text, url):
+    """跳过超大页面（超过 10,000 词的页面）"""
     word_count = len(re.findall(r"\w+", text))
     if word_count > 10000:
         print(f"🚀 Skipping large page: {word_count} words, {url}")
@@ -66,8 +83,19 @@ def is_large_page(text, url):
     return False
 
 def is_valid(url):
+    """
+    检查 URL 是否符合爬取条件：
+    1. 移除所有动态参数（只保留 scheme://netloc/path）。
+    2. 协议必须为 http/https。
+    3. 域名必须属于允许范围。
+    4. 屏蔽图片库、相册、幻灯片等页面。
+    5. 过滤非 HTML 文件（包括 .txt、.apk、.zip 等）。
+    """
     try:
         parsed = urlparse(url)
+        # 移除所有动态参数，保留 scheme://netloc/path
+        normalized_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        parsed = urlparse(normalized_url)
         if parsed.scheme not in {"http", "https"}:
             return False
 
@@ -75,10 +103,16 @@ def is_valid(url):
         if not any(parsed.netloc.endswith(domain) for domain in allowed_domains):
             return False
 
+        # 屏蔽图片库、相册、幻灯片等页面
+        gallery_keywords = ["gallery", "album", "slideshow"]
+        if any(keyword in parsed.path.lower() for keyword in gallery_keywords):
+            return False
+
+        # 过滤非 HTML 文件（新增 .txt、.apk 等）
         if re.match(
             r".*\.(css|js|bmp|gif|jpe?g|ico"
             r"|png|tiff?|mid|mp2|mp3|mp4"
-            r"|wav|avi|mov|mpeg|ram|m4v|mkv|ogg|ogv|pdf"
+            r"|wav|avi|mov|mpeg|ram|m4v|mkv|ogg|ogv|pdf|txt|apk"
             r"|ps|eps|tex|ppt|pptx|doc|docx|xls|xlsx|names"
             r"|data|dat|exe|bz2|tar|msi|bin|7z|psd|dmg|iso"
             r"|epub|dll|cnf|tgz|sha1"
@@ -94,6 +128,7 @@ def is_valid(url):
         return False
 
 def extract_next_links(url, resp):
+    """从页面中提取所有链接，并转换为绝对 URL（同时去除锚点）"""
     extracted_links = []
     if resp.status != 200:
         return extracted_links
@@ -112,7 +147,12 @@ def extract_next_links(url, resp):
     return extracted_links
 
 def compute_simhash(text, hash_bits=64):
-
+    """
+    计算文本的 SimHash 指纹：
+    1. 简单分词，并仅保留有效单词。
+    2. 对每个单词计算 hash 值，然后对每一位累加权值。
+    3. 根据累加结果构建指纹（正则记为 1，否则为 0）。
+    """
     tokens = re.findall(r'\w+', text.lower())
     tokens = [token for token in tokens if is_valid_word(token)]
     vector = [0] * hash_bits
@@ -131,6 +171,7 @@ def compute_simhash(text, hash_bits=64):
     return fingerprint
 
 def hamming_distance(hash1, hash2):
+    """计算两个 SimHash 指纹之间的 Hamming 距离"""
     x = hash1 ^ hash2
     distance = 0
     while x:
@@ -139,7 +180,15 @@ def hamming_distance(hash1, hash2):
     return distance
 
 def scraper(url, resp):
-    global unique_pages, page_count, longest_page_word_count, longest_page_url, word_frequency, ics_subdomains, page_simhashes
+    """
+    主爬虫函数：
+    1. URL 去重、更新统计数据；
+    2. 解析页面文本，过滤低价值、超大、近重复以及内容太少的页面；
+    3. 更新单词频率、最长页面及 ICS 子域统计；
+    4. 返回页面中符合条件的链接。
+    """
+    global unique_pages, page_count, longest_page_word_count, longest_page_url
+    global word_frequency, ics_subdomains, page_simhashes
 
     url_no_fragment, _ = urldefrag(url)
     if url_no_fragment in unique_pages:
@@ -153,12 +202,13 @@ def scraper(url, resp):
             soup = BeautifulSoup(html_content, "html.parser")
             text = soup.get_text(separator=" ", strip=True)
 
+            # 跳过低价值页面与超大页面
             if is_low_value_page(url_no_fragment, text):
                 return []
-
             if is_large_page(text, url_no_fragment):
                 return []
 
+            # 网页指纹检测，避免精确或近似重复页面
             simhash_val = compute_simhash(text)
             for existing_simhash in page_simhashes:
                 if hamming_distance(simhash_val, existing_simhash) <= 3:
@@ -169,8 +219,22 @@ def scraper(url, resp):
             if is_exceeding_subdomain_limit(url_no_fragment):
                 return []
 
+            # 统计有效单词数（过滤停用词和无效单词）
             words = re.findall(r"\w+", text.lower())
             filtered_words = [w for w in words if w not in STOP_WORDS and is_valid_word(w)]
+            # 如果有效单词数过少，则认为页面无实质内容
+            if len(filtered_words) < 50:
+                print(f"🚀 Skipping low-content page: {url_no_fragment}")
+                return []
+
+            # 可选：如检测页面中导航词占比较高，则跳过（导航页面）
+            NAV_TERMS = {"up", "next", "prev", "size", "image", "original"}
+            if filtered_words:
+                nav_count = sum(1 for w in filtered_words if w in NAV_TERMS)
+                if (nav_count / len(filtered_words)) > 0.1:
+                    print(f"🚀 Skipping navigation heavy page: {url_no_fragment}")
+                    return []
+
             current_word_count = len(filtered_words)
             if current_word_count > longest_page_word_count:
                 longest_page_word_count = current_word_count
@@ -187,7 +251,7 @@ def scraper(url, resp):
 
     links = extract_next_links(url, resp)
     return [link for link in links if is_valid(link)]
-
+    
 def save_report():
     with open("crawl_report.txt", "w", encoding="utf-8") as f:
         f.write("=== Crawler Statistics ===\n")
