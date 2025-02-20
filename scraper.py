@@ -43,10 +43,6 @@ def hamming_distance(hash1, hash2):
 
 def normalize_url(url):
     return urldefrag(url)[0]
-    # parsed = urlparse(url)
-    # query_params = frozenset((k, tuple(v)) for k, v in parse_qs(parsed.query).items() if k not in {"tribe-bar-date", "eventDate", "ical", "paged"})
-    # normalized = parsed._replace(query="").geturl()  
-    # return (normalized, query_params)
 
 seenUrls = set()  
 word_counter = Counter()  
@@ -65,11 +61,6 @@ simhash_cache = {}
 def scraper(url, resp):
     global seenUrls, word_counter, subdomain_count, longest_page, subdomain_unique_urls
 
-    # clean_url = urldefrag(url)[0]
-    
-    
-    
-    # normalized_url, query_params = normalize_url(url)
     if resp.status in [404, 608, 403, 500]:
         print(f"404 skip:{url}")
         return []
@@ -79,9 +70,6 @@ def scraper(url, resp):
     if (normalized_url) in seenUrls:
         print(f"seen{normalized_url}")
         return []
-    
-    
-    
     
     if resp.raw_response is None:
         print(f"http no responce: {url}")
@@ -116,6 +104,7 @@ def scraper(url, resp):
         print(f"file type skip ({content_type}),skip: {url}")
         return []
     seenUrls.add((normalized_url))
+    print(f"Total unique pages seen: {len(seenUrls)}")
 
     parsed = urlparse(url)
     if parsed.netloc.endswith("ics.uci.edu"):
@@ -216,11 +205,26 @@ def is_valid(url):
     if any(keyword in parsed.path.lower() for keyword in ["404", "not found"]):#new
         return False
 
+    # if parsed.netloc == "grape.ics.uci.edu":
+    #     if parsed.path == "/wiki/public/wiki/cs221-2019-spring" or parsed.path == "":  
+    #         return True
+    #     else:
+    #         print(f"skip grape.ics.uci.edu others: {url}")
+    #         return False
     if parsed.netloc == "grape.ics.uci.edu":
-        if parsed.path == "/" or parsed.path == "":  
-            return True
+        if parsed.path == "/wiki":
+            return True  
+        elif parsed.path.startswith("/wiki/public/wiki/"):
+            sub_path = parsed.path[len("/wiki/public/wiki/"):]  
+
+            
+            if "/" not in sub_path and not parsed.query:  
+                return True
+            else:
+                print(f"Skipping deeper path or query in grape.ics.uci.edu: {url}")
+                return False
         else:
-            print(f"skip grape.ics.uci.edu others: {url}")
+            print(f"Skipping other grape.ics.uci.edu pages: {url}")
             return False
     
 
